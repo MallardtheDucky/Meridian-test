@@ -2144,13 +2144,12 @@
         </div>`;
     }
 
-    // ---------- AN-5-001 Recovered Audio Buffer: real Web Audio synthesis, no external source ----------
-    // Everything below is generated locally in-browser (oscillators, filters, noise). Nothing is loaded
-    // or streamed from any external file - this is why the card can honestly claim "no source material on file."
     const AN5001_AUDIO_ID = 'an5001-log-4';
+    const AN5001_SOURCE_FILE = 'audio/The Chordettes Lollipop (Featured In The Movie SMILE) (Remastered).mp3';
     let an5001Ctx = null, an5001Master = null, an5001Analyser = null, an5001RadioGain = null;
     let an5001Nodes = [];
     let an5001RafId = null, an5001GlitchTimer = null, an5001BeepTimer = null;
+    let an5001SourceBuffer = null;
 
     function an5001MakeNoiseBuffer(ctx, seconds) {
         const len = Math.floor(ctx.sampleRate * seconds);
@@ -2170,7 +2169,15 @@
         return curve;
     }
 
-    function an5001BuildGraph(ctx) {
+    async function an5001LoadSourceBuffer(ctx) {
+        if (an5001SourceBuffer) return an5001SourceBuffer;
+        const resp = await fetch(AN5001_SOURCE_FILE);
+        const arrayBuffer = await resp.arrayBuffer();
+        an5001SourceBuffer = await ctx.decodeAudioData(arrayBuffer);
+        return an5001SourceBuffer;
+    }
+
+    async function an5001BuildGraph(ctx) {
         const master = ctx.createGain();
         master.gain.value = 0;
         master.connect(ctx.destination);
@@ -2180,7 +2187,6 @@
         const now = ctx.currentTime;
         const nodes = [];
 
-        // wow & flutter - shared LFOs feeding every oscillator's detune
         const wow = ctx.createOscillator(); wow.type = 'sine'; wow.frequency.value = 0.27;
         const wowGain = ctx.createGain(); wowGain.gain.value = 17;
         wow.connect(wowGain);
@@ -2190,23 +2196,22 @@
         wow.start(now); flutter.start(now);
         nodes.push(wow, flutter);
 
-        // harmonized drone bus standing in for a "voice" buried in the signal
-        const vocalBus = ctx.createGain(); vocalBus.gain.value = 0.15;
+        const vocalBus = ctx.createGain(); vocalBus.gain.value = 0.9;
         const vocalFilter = ctx.createBiquadFilter();
         vocalFilter.type = 'bandpass'; vocalFilter.frequency.value = 1250; vocalFilter.Q.value = 1.1;
         const shaper = ctx.createWaveShaper();
-        shaper.curve = an5001DistortionCurve(6); shaper.oversample = '2x';
-        [220, 277.18, 329.63, 440].forEach((f, i) => {
-            const osc = ctx.createOscillator();
-            osc.type = i % 2 === 0 ? 'triangle' : 'sine';
-            osc.frequency.value = f;
-            const g = ctx.createGain(); g.gain.value = 0.9 / 4;
-            wowGain.connect(osc.detune);
-            flutterGain.connect(osc.detune);
-            osc.connect(g); g.connect(vocalBus);
-            osc.start(now);
-            nodes.push(osc);
-        });
+        shaper.curve = an5001DistortionCurve(4); shaper.oversample = '2x';
+
+        const buffer = await an5001LoadSourceBuffer(ctx);
+        const src = ctx.createBufferSource();
+        src.buffer = buffer;
+        src.loop = true;
+        wowGain.connect(src.detune);
+        flutterGain.connect(src.detune);
+        src.connect(vocalBus);
+        src.start(now);
+        nodes.push(src);
+
         vocalBus.connect(vocalFilter); vocalFilter.connect(shaper); shaper.connect(master);
 
         const filterLFO = ctx.createOscillator(); filterLFO.type = 'sine'; filterLFO.frequency.value = 0.05;
@@ -2215,7 +2220,6 @@
         filterLFO.start(now);
         nodes.push(filterLFO);
 
-        // tape hiss
         const hissSrc = ctx.createBufferSource();
         hissSrc.buffer = an5001MakeNoiseBuffer(ctx, 2); hissSrc.loop = true;
         const hissFilter = ctx.createBiquadFilter(); hissFilter.type = 'highpass'; hissFilter.frequency.value = 4000;
@@ -2224,13 +2228,11 @@
         hissSrc.start(now);
         nodes.push(hissSrc);
 
-        // electrical hum
         const hum1 = ctx.createOscillator(); hum1.type = 'sine'; hum1.frequency.value = 60;
         const humGain1 = ctx.createGain(); humGain1.gain.value = 0.018;
         hum1.connect(humGain1); humGain1.connect(master); hum1.start(now);
         nodes.push(hum1);
 
-        // radio interference sweep - its gain gets spiked during glitch events below
         const radioSrc = ctx.createBufferSource();
         radioSrc.buffer = an5001MakeNoiseBuffer(ctx, 2); radioSrc.loop = true;
         const radioFilter = ctx.createBiquadFilter(); radioFilter.type = 'bandpass'; radioFilter.Q.value = 8; radioFilter.frequency.value = 1000;
@@ -2258,7 +2260,7 @@
         an5001GlitchTimer = setTimeout(() => {
             if (!an5001Ctx || !an5001Master) return;
             const now = an5001Ctx.currentTime;
-            const dropDepth = 0.35 + Math.random() * 0.6; // deep dips - "can't hear it" at the worst points
+            const dropDepth = 0.35 + Math.random() * 0.6;
             const dur = 0.12 + Math.random() * 0.5;
             const base = an5001Master.gain.value;
             an5001SetInterference(true);
@@ -2320,11 +2322,11 @@
         an5001RafId = requestAnimationFrame(an5001Draw);
     }
 
-    function an5001Start() {
+    async function an5001Start() {
         if (!an5001Ctx) an5001Ctx = new (window.AudioContext || window.webkitAudioContext)();
         if (an5001Ctx.state === 'suspended') an5001Ctx.resume();
-        an5001Stop(true); // silently tear down any previous graph first
-        const built = an5001BuildGraph(an5001Ctx);
+        an5001Stop(true);
+        const built = await an5001BuildGraph(an5001Ctx);
         an5001Master = built.master;
         an5001Analyser = built.analyser;
         an5001Nodes = built.nodes;
@@ -2333,7 +2335,7 @@
         const now = an5001Ctx.currentTime;
         an5001Master.gain.cancelScheduledValues(now);
         an5001Master.gain.setValueAtTime(0.0001, now);
-        an5001Master.gain.exponentialRampToValueAtTime(0.5, now + 1.1); // tape spin-up
+        an5001Master.gain.exponentialRampToValueAtTime(0.5, now + 1.1);
 
         an5001ScheduleBeep();
         an5001ScheduleGlitch();
