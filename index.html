@@ -2150,6 +2150,7 @@
     let an5001Live = null;
     let an5001RafId = null, an5001BeepTimer = null, an5001TickTimer = null;
     let an5001SourceBuffer = null;
+    let an5001Volume = 0.8;
 
     function an5001MakeNoiseBuffer(ctx, seconds) {
         const len = Math.floor(ctx.sampleRate * seconds);
@@ -2233,7 +2234,10 @@
     async function an5001BuildGraph(ctx) {
         const master = ctx.createGain();
         master.gain.value = 0;
-        master.connect(ctx.destination);
+        const volumeGain = ctx.createGain();
+        volumeGain.gain.value = an5001Volume;
+        master.connect(volumeGain);
+        volumeGain.connect(ctx.destination);
         const analyser = ctx.createAnalyser();
         analyser.fftSize = 256;
         master.connect(analyser);
@@ -2331,12 +2335,19 @@
         mainSrc.start(startAt);
 
         return {
-            master, analyser, nodes, startAt, duration: buffer.duration,
+            master, analyser, nodes, startAt, duration: buffer.duration, volumeGain,
             mainSrc, mainChainGain, overlayBus, lGain, rGain,
             lowpassFilter, ringFilter, softShaper, hardClipDrive,
             wowGain, flutterGain, hissGain, humGain, radioGain, crushState
         };
     }
+
+    window.an5001SetVolume = function(v) {
+        an5001Volume = Math.max(0, Math.min(1, parseFloat(v)));
+        if (an5001Ctx && an5001Live && an5001Live.volumeGain) {
+            an5001Live.volumeGain.gain.setTargetAtTime(an5001Volume, an5001Ctx.currentTime, 0.05);
+        }
+    };
 
     function an5001HandleEnded() {
         if (audioTimers[AN5001_AUDIO_ID]) { clearTimeout(audioTimers[AN5001_AUDIO_ID]); delete audioTimers[AN5001_AUDIO_ID]; }
@@ -2641,6 +2652,7 @@
         const progress = Math.min(state.anomalyLogsProgress[logId] || 0, total);
         const started = progress > 0 || isPlaying || !!typing;
         const finished = progress >= total && !typing;
+        const isHoldingAtEnd = logId === AN5001_AUDIO_ID && isPlaying && finished && !!an5001Live;
         const isWaiting = isPlaying && !typing && !finished;
         const seed = seedFromString(logId);
 
@@ -2666,7 +2678,7 @@
             return `<div class="cassette-lock-bar my-1.5" style="width:${w.toFixed(0)}%;" title="LOCKED - CANNOT SKIP AHEAD OF PLAYBACK" onclick="revealRedact(this)"></div>`;
         }).join('');
 
-        const statusLabel = isPlaying ? 'PLAYING' : (finished ? 'STOPPED' : (started ? 'PAUSED' : 'STOPPED'));
+        const statusLabel = isHoldingAtEnd ? 'SIGNAL CONTINUES' : (isPlaying ? 'PLAYING' : (finished ? 'STOPPED' : (started ? 'PAUSED' : 'STOPPED')));
 
         return `
         <div class="tech-border bg-black p-3 my-3" style="${isPlaying ? 'border-color:var(--color-red);' : ''}">
@@ -2688,17 +2700,22 @@
                 </button>
                 <canvas id="${logId}-canvas" width="440" height="60" class="flex-1 max-w-[220px]" style="height:26px;background:#000;border:1px solid var(--color-panel-border);"></canvas>
             </div>
+            <div class="flex items-center gap-2 mb-1 px-0.5">
+                <i data-lucide="volume-2" class="w-3 h-3 text-[var(--color-cyan-dim)] shrink-0"></i>
+                <input type="range" min="0" max="100" value="${Math.round(an5001Volume * 100)}" oninput="an5001SetVolume(this.value/100)" class="flex-1" style="accent-color:var(--color-cyan);height:3px;">
+                <span class="text-[8px] text-[var(--color-text-dim)] font-mono-tech w-7 text-right">${Math.round(an5001Volume * 100)}%</span>
+            </div>
             <div id="${logId}-interference" class="text-[8px] text-center uppercase tracking-widest mb-2 h-3" style="color:var(--color-red);letter-spacing:.12em;"></div>
             <div class="border-t border-[var(--color-panel-border)] pt-2">
                 <div class="flex items-center justify-between text-[9px] text-[var(--color-cyan-dim)] uppercase tracking-widest mb-1.5">
                     <span>Signal Analysis Log</span>
-                    <span>${started ? `${progress} / ${total} LINES DECODED` : 'SIGNAL LOCKED'}</span>
+                    <span>${started ? (isHoldingAtEnd ? 'TRANSCRIPT COMPLETE' : `${progress} / ${total} LINES DECODED`) : 'SIGNAL LOCKED'}</span>
                 </div>
                 ${started ? `
                 <div class="cassette-log-box flex flex-col gap-0.5 h-32 sm:h-44 overflow-y-auto custom-scrollbar bg-[#010405] border border-[var(--color-panel-border)] p-2 pt-3" id="log-scroll-${logId}" data-scroll-id="cassette-log-${logId}">
                     ${linesHtml}
                 </div>
-                ${isWaiting ? `<div class="cassette-waiting text-[9px] text-[var(--color-cyan-dim)] uppercase tracking-widest mt-1.5 text-center">\u2022 \u2022 \u2022 signal continues \u2022 \u2022 \u2022</div>` : ''}
+                ${(isWaiting || isHoldingAtEnd) ? `<div class="cassette-waiting text-[9px] text-[var(--color-cyan-dim)] uppercase tracking-widest mt-1.5 text-center">\u2022 \u2022 \u2022 signal continues \u2022 \u2022 \u2022</div>` : ''}
                 ` : `<div class="text-[9px] text-[var(--color-text-dim)] italic pt-1">TRANSCRIPT SEALED - PRESS PLAY TO BEGIN DECODING THE SIGNAL. PLAYBACK CANNOT BE SKIPPED AHEAD.</div>`}
             </div>
             <div class="text-[8px] text-[var(--color-text-dim)] italic mt-2">LOCAL WAVEFORM SYNTHESIS FOR ANALYSIS PLAYBACK ONLY. NO SOURCE RECORDING IS ON FILE.</div>
@@ -3362,6 +3379,7 @@
             if (!typing) {
                 const lineIdx = state.anomalyLogsProgress[id] || 0;
                 if (lineIdx >= lines.length) {
+                    if (id === AN5001_AUDIO_ID && an5001Live) { return; }
                     state.anomalyLogsOpen[id] = false;
                     update();
                     return;
@@ -3384,6 +3402,7 @@
             update();
             followIfBottom(wasAtBottom);
             if (state.anomalyLogsProgress[id] >= lines.length) {
+                if (id === AN5001_AUDIO_ID && an5001Live) { return; }
                 state.anomalyLogsOpen[id] = false;
                 update();
                 return;
